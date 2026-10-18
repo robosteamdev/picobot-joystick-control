@@ -88,6 +88,7 @@ async def _ws_handler(reader, writer):
                 # Parse failure → same path as deadman
                 safety.hard_disable()
                 _set_drive(0, 0, 0)
+                show_moves.stop()
                 try:
                     await ws.send(writer, f"ERR,{_rseq()},parse,{e}")
                 except Exception:
@@ -125,6 +126,7 @@ async def _dispatch(writer, text):
         if val == 0:
             safety.hard_disable()
             _set_drive(0, 0, 0)
+            show_moves.stop()
         else:
             safety.do_arm()
         await ws.send(writer, f"ACK,{_rseq()}")
@@ -135,6 +137,13 @@ async def _dispatch(writer, text):
         show_moves.stop()
         await ws.send(writer, f"ACK,{_rseq()}")
 
+    elif cmd == 'K':
+        # SHOW OFF keepalive: refresh safety without replacing demo motor targets.
+        # Only the connected control page can send these WebSocket frames.
+        seq = int(parts[1])
+        if safety.is_armed():
+            safety.feed_deadman()
+
     elif cmd == 'D':
         seq = int(parts[1])
         if not _seq_newer(seq, _last_drive_seq) and _last_drive_seq != -1:
@@ -144,6 +153,9 @@ async def _dispatch(writer, text):
         s = int(parts[3])
         r = int(parts[4])
         safety.feed_deadman()
+        # An explicit manual drive command takes priority over a demonstration.
+        if show_moves.is_running():
+            show_moves.stop()
         _set_drive(f, s, r)
 
     elif cmd == 'A':
@@ -160,6 +172,15 @@ async def _dispatch(writer, text):
         seq = int(parts[1])
         move_id = parts[2]
         speed   = int(parts[3])
+        if move_id == 'stop':
+            # Stop only the demonstration. Global STOP remains an emergency DISARM.
+            show_moves.stop()
+            _set_drive(0, 0, 0)
+            await ws.send(writer, f"ACK,{_rseq()}")
+            return
+        if not safety.is_armed():
+            await ws.send(writer, f"ERR,{_rseq()},disarmed,arm_first")
+            return
         ok = await show_moves.start(move_id, speed, _set_drive)
         if ok:
             await ws.send(writer, f"ACK,{_rseq()}")
@@ -184,7 +205,12 @@ async def _dispatch(writer, text):
 async def _motor_loop():
     """Apply drive target to motors at ~50 Hz."""
     while True:
-        drive.apply(_drive_f, _drive_s, _drive_r, safety.is_armed())
+        armed = safety.is_armed()
+        if not armed and show_moves.is_running():
+            # Deadman timeout cannot leave a paused demo ready to resume on ARM.
+            show_moves.stop()
+            _set_drive(0, 0, 0)
+        drive.apply(_drive_f, _drive_s, _drive_r, armed)
         await asyncio.sleep_ms(20)
 
 

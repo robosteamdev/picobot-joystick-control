@@ -44,6 +44,10 @@ angles, distance). It also has 10 "show-off" moves.
    **Upload to /** (details and `mpremote` commands: `tools/upload_to_pico.md`).
 4. Restart the robot, connect the phone to the robot's Wi-Fi and open **http://192.168.4.1/**.
 5. Press **ARM**, then drive. **STOP** stops the robot at once.
+6. Check the **arm joystick** with the wheels lifted: pushing it right must turn the arm to the right, pushing it up
+   must lift the arm. If a direction is reversed on your robot (servos can be mounted the other way), open
+   `pico/PicoBot/www/index.html` and change the two lines `AJ_BASE_DIRECTION` and `AJ_ARM_DIRECTION` at the very top of the
+   script from `-1` to `+1` (or the other way round); the comments there explain which line does what. Upload the file again.
 
 ## Safety
 

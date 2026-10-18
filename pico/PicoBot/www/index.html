@@ -678,6 +678,21 @@ canvas { display: block; touch-action: none; }
 <script>
 'use strict';
 
+/* ════════════════════════════════════════════════════════════════════
+   SETTINGS FOR YOUR ROBOT  - change these two lines if needed
+   ════════════════════════════════════════════════════════════════════
+   The arm joystick must move the arm the way the thumb moves.
+   Test it with the robot ARMED and the wheels lifted off the table:
+   - If pushing the arm joystick RIGHT turns the arm to the LEFT, change AJ_BASE_DIRECTION
+     from -1 to +1 (or from +1 to -1).
+   - If pushing the arm joystick UP moves the arm DOWN, change AJ_ARM_DIRECTION
+     from +1 to -1 (or from -1 to +1).
+   Servos can be mounted in the opposite direction on different robots, so this
+   is the only place you need to change. After editing, upload index.html again. */
+const AJ_BASE_DIRECTION = -1;  // -1 or +1: right thumb -> base turns right
+const AJ_ARM_DIRECTION  = +1;  // -1 or +1: up thumb -> arm moves up
+/* ════════════════════════════════════════════════════════════════════ */
+
 /* ════════════════════════════════════
    WEBSOCKET CONFIG & STATE
 ════════════════════════════════════ */
@@ -740,7 +755,12 @@ function isConnected() { return sock && sock.readyState === 1; }
 
 function handleMsg(text) {
   var p = text.split(',');
-  if (p[0] === 'ERR') logIt('ERR: ' + p.slice(2).join(' '), '');
+  if (p[0] === 'S' && p.length > 3) {
+    // Telemetry, not button optimism, is the source of truth for ARM state.
+    var motorArmed = p[3] === '1';
+    if (motorArmed !== armed) setArmedUI(motorArmed);
+    if (!motorArmed && activeMove !== null) stopMove(false);
+  } else if (p[0] === 'ERR') logIt('ERR: ' + p.slice(2).join(' '), '');
   else if (p[0] === 'K') logIt('K: ' + p.slice(1).join(' '), '');
 }
 
@@ -760,7 +780,7 @@ function setWsDialogStatus(msg) {
 ════════════════════════════════════ */
 function toggleArm() {
   if (!isConnected()) { logIt('NOT CONNECTED', ''); return; }
-  if (armed) { send('ARM,' + nextSeq() + ',0'); setArmedUI(false); }
+  if (armed) { stopMove(false); send('ARM,' + nextSeq() + ',0'); setArmedUI(false); }
   else        { send('ARM,' + nextSeq() + ',1'); setArmedUI(true);  }
 }
 
@@ -768,6 +788,7 @@ function resetArm() {
   stopHeartbeat(); stopDriveLoop(); driveOwner = null;
   if (armed) { send('STOP,' + nextSeq()); send('ARM,' + nextSeq() + ',0'); }
   setArmedUI(false);
+  stopMove(false);
 }
 
 function setArmedUI(val) {
@@ -787,7 +808,7 @@ function sendStop() {
   send('STOP,' + nextSeq());
   send('ARM,' + nextSeq() + ',0');
   setArmedUI(false);
-  stopMove();
+  stopMove(false);
 }
 
 document.addEventListener('visibilitychange', function() {
@@ -796,6 +817,7 @@ document.addEventListener('visibilitychange', function() {
     send('STOP,' + nextSeq());
     send('ARM,' + nextSeq() + ',0');
     setArmedUI(false);
+    stopMove(false);
   }
 });
 
@@ -814,7 +836,14 @@ function sendDrive() {
   if (driveOwner === 'right') { f = Math.round(joy.right.y * 100); r = Math.round(joy.right.x * 60); }
   send('D,' + nextSeq() + ',' + f + ',' + s + ',' + r);
 }
-function sendZeroDrive() { if (isConnected()) send('D,' + nextSeq() + ',0,0,0'); }
+function sendZeroDrive() {
+  if (!isConnected()) return;
+  // SHOW OFF needs a heartbeat that does NOT overwrite the scripted motion.
+  if (document.getElementById('screen-show').classList.contains('active'))
+    send('K,' + nextSeq());
+  else
+    send('D,' + nextSeq() + ',0,0,0');
+}
 
 function onJoyTouch(side) {
   if (driveOwner === null) { driveOwner = side; stopHeartbeat(); startDriveLoop(); }
@@ -852,7 +881,7 @@ function switchScreen(s) {
   if (mg) mg.style.display = s === 'ctrl' ? 'flex' : 'none';
   if (sep && sep.classList.contains('tb-sep')) sep.style.display = s === 'ctrl' ? 'block' : 'none';
   if (s === 'ctrl') { stopMove(); resizeCanvases(); if (isConnected()) startHeartbeat(); }
-  if (s === 'show') { stopDriveJS(); setTimeout(resizeShowCards, 50); }
+  if (s === 'show') { stopDriveJS(); if (isConnected()) startHeartbeat(); setTimeout(resizeShowCards, 50); }
 }
 
 /* ════════════════════════════════════
@@ -1337,14 +1366,16 @@ const MOVE_IDS = ['spin','moonwalk','orbit','rear_pivot','planet','figure8','wig
 
 function selMove(id) {
   if (activeMove === id) { stopMove(); return; }
+  if (!isConnected() || !armed) return;
   stopMove();
   activeMove = id;
   document.querySelector('.move-card[data-id="' + id + '"]').classList.add('active');
-  if (isConnected()) send('M,' + nextSeq() + ',' + MOVE_IDS[id] + ',50');
+  send('M,' + nextSeq() + ',' + MOVE_IDS[id] + ',50');
 }
 
-function stopMove() {
-  if (activeMove !== null && isConnected()) send('STOP,' + nextSeq());
+function stopMove(sendCommand = true) {
+  // M,...,stop ends just the demo; STOP is reserved for full emergency DISARM.
+  if (sendCommand && activeMove !== null && isConnected()) send('M,' + nextSeq() + ',stop,0');
   activeMove = null;
   document.querySelectorAll('.move-card').forEach(function(c) { c.classList.remove('active'); });
 }
@@ -1769,12 +1800,12 @@ function updateArmJoy(px, py) {
 
   /* Map joystick deflection as DELTA from position at stroke start.
      Full deflection (±1.0 after expo) = ±90° change.
-     This means wherever the arm was, pushing fully right adds 90°,
-     pushing fully left subtracts 90°, and releasing remembers where it stopped. */
+     Direction signs at the top of this script account for the servo orientation;
+     releasing the joystick retains the last position. */
   if (ajAxisLock === 'base') {
     ajTx = rawX; ajTy = 0;
     const delta = expoAJ(rawX / R) * 90;
-    ajBase = Math.round(ajBaseAtStrokeStart + delta);
+    ajBase = Math.round(ajBaseAtStrokeStart + AJ_BASE_DIRECTION * delta);
     ajBase = Math.max(0, Math.min(180, ajBase));
     ajBasePos = ajBase;
     document.getElementById('aj-base').textContent  = ajBase;
@@ -1783,7 +1814,7 @@ function updateArmJoy(px, py) {
   } else {
     ajTx = 0; ajTy = rawY;
     const delta = expoAJ(rawY / R) * 90;
-    ajArm = Math.round(ajArmAtStrokeStart - delta);
+    ajArm = Math.round(ajArmAtStrokeStart + AJ_ARM_DIRECTION * delta);
     const al = SERVO_LIMITS.arm;
     ajArm = Math.max(al.min, Math.min(al.max, ajArm));
     ajArmPos = ajArm;
